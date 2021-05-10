@@ -45,42 +45,57 @@ function Wirtinger_flow(A::AbstractMatrix{<:Number},
     x = copy(x0)
     Ax = A * x
     if gradhow ==:gaussian
-        cost_fun = x -> norm(max.(y-b,0) - abs2.(A * x))^2
+        cost_fun = Ax -> norm(max.(y-b,0) - abs2.(Ax))^2
     elseif gradhow ==:poisson
         phi = (v, yi, bi) -> (abs2(v) + bi) - yi * log(abs2(v) + bi) # (v^2 + b) - yi * log(v^2 + b)
-        cost_fun = x -> sum(phi.(A * x, y, b))
+        cost_fun = Ax -> sum(phi.(Ax, y, b))
     else
         throw("unknown gradhow")
     end
 
+    # num_idx = 0
     for iter = 1:niter
         # First compute A * x
         if istrun
             idx = abs.(y - abs2.(Ax)) .<= trunreg * mean(abs.(y - abs2.(Ax))) * abs2.(Ax) / norm(x)
-            B = LinearMapAA(x -> (A * x)[idx], y -> A' * embed(y, idx), (sum(idx), N); T = ComplexF32)
-            ∇f, fisher = cal_grad(B, x, y[idx], b[idx], gradhow, xhow)
+            # num_idx += sum(idx)
+            if isa(A, Array)
+                B = A[idx, :]
+            else
+                B = LinearMapAA(x -> (A * x)[idx], y -> A' * embed(y, idx), (sum(idx), N); T = ComplexF32)
+            end
+            ∇f, fisher = cal_grad(B, B * x, y[idx], b[idx], gradhow, xhow)
         else
-            ∇f, fisher = cal_grad(A, x, y, b, gradhow, xhow)
+            ∇f, fisher = cal_grad(A, Ax, y, b, gradhow, xhow)
         end
 
+        Adk = A * ∇f
         if sthow === :fisher
             D = Diagonal(fisher.(Ax, b))
-            Adk = A * ∇f
             μ = - norm(∇f)^2 / real(Adk' * D * Adk)
-            x_old = copy(x)
+            if isnan(μ)
+                @warn("break due to nan!")
+                break
+            end
             x += μ * ∇f
             Ax += μ * Adk
         elseif sthow === :lineser
             μ = 1
             x_old = copy(x)
+            Ax_old = copy(Ax)
+            cost_Ax_old = cost_fun(Ax_old)
+
             x_new = x - μ * ∇f
+            Ax_new = Ax - μ * Adk
+            mu_grad_f = mustep * norm(∇f, 2)^2
             # cost fun should take A * x0 as input.
             # Tuning param input args
-            while cost_fun(x_new) > cost_fun(x_old) - mustep * μ * norm(∇f, 2)^2
+            while cost_fun(Ax_new) > cost_Ax_old - μ * mu_grad_f
                 μ = μ / 2
-                x_new = x_old - μ * ∇f # Find a suitable μ
+                x_new = x_old - μ * ∇f
+                Ax_new = Ax_old - μ * Adk # Find a suitable μ
             end
-            x = x_new
+            x = copy(x_new)
             Ax = A * x
         else
             throw("unknown sthow!")
@@ -88,17 +103,19 @@ function Wirtinger_flow(A::AbstractMatrix{<:Number},
 
         out[iter + 1] = fun(x, iter)
     end
+    
     return x, out
+    # return x, num_idx/(M * niter), out
 end
 
-function cal_grad(sys, x, y, b, gradhow, xhow)
+function cal_grad(sys, sysx, y, b, gradhow, xhow)
     if gradhow ===:gaussian
         fisher = (vi, bi) -> 16 * abs2(vi) * (abs2(vi) + bi)
         grad_phi = (v, yi, bi) -> (abs2(v) - max(yi - bi, 0)) * v
         if xhow ==:real
-            ∇f = 4 * real(sys' * grad_phi.(sys * x, y, b))
+            ∇f = 4 * real(sys' * grad_phi.(sysx, y, b))
         elseif xhow ==:complex
-            ∇f = 4 * sys' * grad_phi.(sys * x, y, b)
+            ∇f = 4 * sys' * grad_phi.(sysx, y, b)
         else
             throw("unknown xhow")
         end
@@ -106,9 +123,9 @@ function cal_grad(sys, x, y, b, gradhow, xhow)
         fisher = (vi, bi) -> 4 * abs2(vi) / (abs2(vi) + bi)
         grad_phi = (v, yi, bi) -> 2 * v * (1 - yi/(abs2(v) + bi))
         if xhow ==:real
-            ∇f = real(sys' * grad_phi.(sys * x, y, b))
+            ∇f = real(sys' * grad_phi.(sysx, y, b))
         elseif xhow ==:complex
-            ∇f = sys' * grad_phi.(sys * x, y, b)
+            ∇f = sys' * grad_phi.(sysx, y, b)
         else
             throw("unknown xhow")
         end
