@@ -1,0 +1,65 @@
+include("utils.jl")
+include("canonical_fft_2d.jl")
+
+xhow = :real
+xtrue = load("./result/A_fft_shepplogan/test_data_fft.jld")["x1"]
+N = size(xtrue, 1)
+avg_count = 1
+oversample = 10
+niter = 200
+
+A = canonical_fft2d(size(xtrue), oversample)
+cons = avg_count / mean(abs2.(A * vec(xtrue)))
+A = sqrt(cons) * A # scale matrix A
+# absA = sqrt(cons) * absA # scale absolute matrix
+M = size(A, 1)
+b = 0.1 * ones(M)
+y_true = abs2.(A * vec(xtrue)) .+ b
+y_pos = rand.(Poisson.(y_true))
+ATA = cons * oversample^2 * N^2 * I(N^2)
+LAA = cons * oversample^2 * N^2
+ATA_inv = inv(ATA)
+
+x0_rand = vec(rand(N, N))
+AC = sqrt(cons) * canonical_fft2d(size(xtrue), oversample; is_real = false)
+B = LinearMapAA(x -> AC'*(Diagonal(y_pos-b)*(AC*x)), (N*N, N*N); T=ComplexF64)
+x0_spectral = power_iter(B, x0_rand, 50)
+α = sqrt((y_pos-b)' * abs2.(AC * x0_spectral)) / (norm(AC * x0_spectral, 4)^2)
+x0_spectral = abs.(α * x0_spectral)
+
+phase_shift = x -> sign.(vec(xtrue)' * vec(x))
+nrmse = x -> iszero(x) ? 1.0 : (norm(x[:] - xtrue[:] .* phase_shift(x)) / norm(xtrue[:] .* phase_shift(x)))
+phi = (v, yi, bi) -> (abs2(v) + bi) - yi * log(abs2(v) + bi) # (v^2 + b) - yi * log(v^2 + b)
+cost_func = (x,iter) -> [sum(phi.(A * x[:], y_pos, b)), time(), nrmse(x)]
+# reg = maximum(2 .+ y_pos ./ (4 * b)) * LAA* 0.004
+
+lf = x -> log10(max(x,1e-16))
+grab = (o,i) -> hcat(o...)[i,:]
+lg = (o,i) -> lf.(grab(o,i))
+
+xout_wf_gau, cout_wf_gau = Wirtinger_flow(A,y_pos,b;
+                gradhow = :gaussian, istrun = false, sthow = :fisher,
+                xhow = xhow, x0 = x0_spectral, niter = niter, fun = cost_func)
+xout_wf_pois, cout_wf_pois = Wirtinger_flow(A,y_pos,b;
+                gradhow = :poisson, istrun = false, sthow = :fisher,
+                xhow = xhow, x0 = x0_spectral, niter = niter, fun = cost_func)
+xout_wf_pois_ls, cout_wf_pois_ls = Wirtinger_flow(A,y_pos,b;
+                gradhow = :poisson, istrun = false, sthow = :lineser,
+                xhow = xhow, x0 = x0_spectral, niter = niter, fun = cost_func)
+xout_gs, cout_gs = Gerchberg_saxton_dft(A,ATA_inv,y_pos,b;
+            xhow = xhow, x0 = x0_spectral, niter = niter, fun = cost_func)
+xout_lsmm, cout_lsmm = LSMM(AC,y_pos,b;
+            curvhow = :max, xhow = xhow, updatehow =:cg,
+            x0 = x0_spectral, niter = niter, fun = cost_func)
+xout_admm, cout_admm = ADMM_dft(A, ATA_inv,y_pos,b;
+            phow =:adaptive, xhow = xhow, x0 = x0_spectral, ρ = 16,
+            niter = niter, fun = cost_func)
+# xout_admm, cout_admm = ADMM(AC,y_pos,b;
+#                 phow =:adaptive, xhow = xhow, updatehow =:cg,
+#                 x0 = x0_spectral, ρ = 16, niter = niter, fun = cost_func)
+xout_lsmm_ODWT, cout_lsmm_ODWT = LSMM_ODWT(A,y_pos,b,LAA;
+            curvhow = :max, xhow = xhow, reg = 32,
+            x0 = x0_spectral, niter = niter, ninner = 10, fun = cost_func)
+xout_admm_ODWT, cout_admm_ODWT = ADMM_ODWT_dft(AC,ATA_inv,y_pos,b;
+            phow =:adaptive, reg = 32, xhow = xhow,
+            x0 = x0_spectral, ρ = 16, niter = niter, fun = cost_func)

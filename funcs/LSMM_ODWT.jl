@@ -79,8 +79,8 @@ function LSMM_ODWT(A::AbstractMatrix{<:Number},
                         s = A * x
                         gs = (b .+ sqrt.(b.^2 + b .* abs2.(s))) ./ abs.(s)
                         W = I(M) * curv_phi.(gs, y, b)
-                        W = min.(W, mean(W) + 3 * std(W))
-                        L = maximum(W) * LAA
+                        W = min.(W, mean(W) + 3 * std(W)) # thresholding
+                        L = maximum(W) * LAA 
                         xk = copy(x)
                         if xhow === :real
                                 ∇q = x -> real(A'*(Diagonal(W)*(A*(x - xk))) + A' * grad_phi.(A * xk, y, b))

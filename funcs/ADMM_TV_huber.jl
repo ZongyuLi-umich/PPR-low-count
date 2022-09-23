@@ -33,6 +33,7 @@ function ADMM_TV_huber(A::AbstractMatrix{<:Number},
                       xhow::Symbol = :real,
                       phow::Symbol = :constant,
                       updatehow::Symbol = :bs,
+                      ref = nothing,
                       fun::Function = (x,iter) -> undef)
         (M, N) = size(A)
         if isnothing(x0)
@@ -44,20 +45,25 @@ function ADMM_TV_huber(A::AbstractMatrix{<:Number},
                 throw("unknown xhow")
             end
         end
+        if isnothing(ref)
+            ref = zeros(eltype(x0), size(x0))
+        end
 
         x = copy(x0)
         # T = spdiagm(0 => -ones(N-1), 1 => ones(N-1))[1:end-1,:]
-        T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        # T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        sn = Int(sqrt(N))
+        T = LinearMapAA(x -> diff2d_forw(x, sn, sn), y -> diff2d_adj(y, sn, sn), (2*sn*(sn-1), N); T=Float64) # for 2D
         soft(v, reg) = sign(v) * max(abs(v) - reg, 0)
         curv_huber = (t, α) -> abs(t) > α ? α/abs(t) : 1
-        v = A * x
+        v = A * (x + vec(ref))
         η = zeros(M)
         z = T * x
         out = Array{Any}(undef, niter+1)
         out[1] = fun(x,0)
 
         for iter = 1:niter
-            Ax_old = A * x
+            Ax_old = A * (x + vec(ref))
             # For v update
             old_v = v
             phase_v = sign.(Ax_old - η)
@@ -78,14 +84,14 @@ function ADMM_TV_huber(A::AbstractMatrix{<:Number},
             v = abs_v .* phase_v
 
             # For x update, Replace by cg + L1
-            ∇q = x -> ρ * A' * (A * x - v - η) + reg1 * T' * (grad_huber.(T * x, reg2))
+            ∇q = x -> ρ * A' * (A * (x + vec(ref)) - v - η) + reg1 * T' * (grad_huber.(T * x, reg2))
             xk = copy(x)
             x, _ = ncg_phase(I(N), ∇q, xk;
                             niter = 3,
-                            W = LinearMapAA(x -> ρ*A'*(A*x) + reg1 * T' * (Diagonal(curv_huber.(T*x, reg2)) * (T * x)), (N,N); T=ComplexF32),
+                            W = LinearMapAA(x -> ρ*A'*(A*(x + vec(ref))) + reg1 * T' * (Diagonal(curv_huber.(T*x, reg2)) * (T * x)), (N,N); T=ComplexF32),
                             xhow = xhow)
 
-            Ax_new = A * x
+            Ax_new = A * (x + vec(ref))
 
             # For η update
             η = η + (v - Ax_new)

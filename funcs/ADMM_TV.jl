@@ -49,7 +49,9 @@ function ADMM_TV(A::AbstractMatrix{<:Number},
 
         x = copy(x0)
         # T = spdiagm(0 => -ones(N-1), 1 => ones(N-1))[1:end-1,:]
-        T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        # T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        sn = Int(sqrt(N))
+        T = LinearMapAA(x -> diff2d_forw(x, sn, sn), y -> diff2d_adj(y, sn, sn), (2*sn*(sn-1), N); T=Float64) # for 2D
         soft(v, reg) = sign(v) * max(abs(v) - reg, 0)
         v = A * x
         η = zeros(M)

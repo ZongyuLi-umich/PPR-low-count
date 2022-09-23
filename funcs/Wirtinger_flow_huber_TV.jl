@@ -9,6 +9,7 @@ Input:
 Optional Input:
 `x0`: initial estimate of x
 `niter`: number of outer iterations, default is 100
+`sthow`: method of choosing step size, ":fisher" or ":lineser"
 `xhow`: type of x, ":real" or ":complex"
 `reg1`: parameter for the Huber function
 `reg2`: parameter for the Huber function
@@ -23,8 +24,12 @@ function Wirtinger_flow_huber(A::AbstractMatrix{<:Number},
                         x0 = nothing,
                         niter = 100,
                         xhow::Symbol = :real,
+                        sthow::Symbol = :fisher,
                         reg1::Real = 32,
                         reg2::Real = 0.5,
+                        ref = nothing,
+                        mustep = 0.01,
+                        mushrink = 2,
                         fun::Function = (x, iter) -> undef)
 
     M, N = size(A)
@@ -38,14 +43,19 @@ function Wirtinger_flow_huber(A::AbstractMatrix{<:Number},
             throw("unknown xhow")
         end
     end
-    T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+    if isnothing(ref)
+        ref = zeros(eltype(x0), size(x0))
+    end
+    # T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64) # for 1D
+    sn = Int(sqrt(N))
+    T = LinearMapAA(x -> diff2d_forw(x, sn, sn), y -> diff2d_adj(y, sn, sn), (2*sn*(sn-1), N); T=Float64) # for 2D
     out[1] = fun(x0,0)
     x = copy(x0)
-    Ax = A * x
+    Ax = A * (x + vec(ref)) # x + ref
     Tx = T * x
     phi = (v, yi, bi) -> (abs2(v) + bi) - yi * log(abs2(v) + bi)
     grad_phi = (v, yi, bi) -> 2 * v * (1 - yi/(abs2(v) + bi))
-    cost_fun = (Ax, Tx) -> sum(phi.(Ax, y, b)) + reg1 * huber.(Tx, reg2)
+    cost_fun = (Ax, Tx) -> sum(phi.(Ax, y, b)) + reg1 * sum(huber.(Tx, reg2))
     fisher = (vi, bi) -> 4 * abs2(vi) / (abs2(vi) + bi)
     curv_huber = (t, α) -> abs(t) > α ? α/abs(t) : 1
     for iter = 1:niter
@@ -59,13 +69,38 @@ function Wirtinger_flow_huber(A::AbstractMatrix{<:Number},
 
         Adk = A * ∇f
         Tdk = T * ∇f
+        if sthow === :fisher
+            # D1 = Diagonal(fisher.(Ax, b))
+            D1 = sqrt.(fisher.(Ax, b))
+            # D2 = Diagonal(curv_huber.(Tx, reg2))
+            D2 = sqrt.(curv_huber.(Tx, reg2))
+            # μ = - norm(∇f)^2 / real(Adk' * D1 * Adk + reg1 * Tdk' * D2 * Tdk)
+            μ = - norm(∇f)^2 / (norm(Adk .* D1)^2 + reg1 * norm(Tdk .* D2)^2)
+            if isnan(μ)
+                @warn("break due to nan!")
+                break
+            end
+        elseif sthow === :lineser
+            μ = -1
+            x_old = copy(x)
+            Ax_old = copy(Ax)
+            Tx_old = copy(Tx)
+            cost_old = cost_fun(Ax_old, Tx_old)
 
-        D1 = Diagonal(fisher.(Ax, b))
-        D2 = Diagonal(curv_huber.(Tx, reg2))
-        μ = - norm(∇f)^2 / real(Adk' * D1 * Adk + reg1 * Tdk' * D2 * Tdk)
-        if isnan(μ)
-            @warn("break due to nan!")
-            break
+            x_new = x + μ * ∇f
+            Ax_new = Ax + μ * Adk
+            Tx_new = Tx + μ * Tdk
+            mu_grad_f = mustep * norm(∇f, 2)^2
+            # cost fun should take A * x0 as input.
+            # Tuning param input args
+            while cost_fun(Ax_new, Tx_new) > cost_old + μ * mu_grad_f
+                μ = μ / mushrink
+                x_new = x_old + μ * ∇f
+                Ax_new = Ax_old + μ * Adk
+                Tx_new = Tx_old + μ * Tdk # Find a suitable μ
+            end
+        else
+            throw("unknown sthow")
         end
         x += μ * ∇f
         Ax += μ * Adk

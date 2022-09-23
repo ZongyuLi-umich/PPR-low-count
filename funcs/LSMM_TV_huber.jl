@@ -29,6 +29,7 @@ function LSMM_TV_huber(A::AbstractMatrix{<:Number},
                 reg1 = 1,
                 reg2 = 1,
                 niter = 100,
+                ref = nothing,
                 fun::Function = (x,iter) -> undef)
 
         M, N = size(A)
@@ -43,6 +44,9 @@ function LSMM_TV_huber(A::AbstractMatrix{<:Number},
                         throw("unknown xhow")
                 end
         end
+        if isnothing(ref)
+                ref = zeros(eltype(x0), size(x0))
+        end
         grad_phi = (v, yi, bi) -> 2 * v * (1 - yi/(abs2(v) + bi)) # Here we know x is real
         curv_phi = (v, yi, bi) -> 2 + 2 * yi * (abs2(v) - bi) / (abs2(v) + bi)^2
         out[1] = fun(x0,0)
@@ -50,7 +54,9 @@ function LSMM_TV_huber(A::AbstractMatrix{<:Number},
         soft(v, reg) = sign(v) * max(abs(v) - reg, 0)
         curv_huber = (t, α) -> abs(t) > α ? α/abs(t) : 1
         # T = spdiagm(0 => -ones(N-1), 1 => ones(N-1))[1:end-1,:]
-        T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        # T = LinearMapAA(x -> diff(x), y -> TV_adj(y), (N-1, N); T=Float64)
+        sn = Int(sqrt(N))
+        T = LinearMapAA(x -> diff2d_forw(x, sn, sn), y -> diff2d_adj(y, sn, sn), (2*sn*(sn-1), N); T=Float64) # for 2D
 
         x = copy(x0)
         xk = copy(x0)
@@ -61,24 +67,33 @@ function LSMM_TV_huber(A::AbstractMatrix{<:Number},
                 AWA = A'*W*A
                 for iter = 1:niter
                         xk = copy(x)
-                        ∇q = x -> AWA * (x - xk) + A' * grad_phi.(A * xk, y, b) + reg1 * T' * (grad_huber.(T * x, reg2))
+                        if xhow === :real
+                                ∇q = x -> real(AWA * (x - xk) + A' * grad_phi.(A * (xk + vec(ref)), y, b) + reg1 * T' * (grad_huber.(T * x, reg2)))
+                        else
+                                ∇q = x -> AWA * (x - xk) + A' * grad_phi.(A * (xk + vec(ref)), y, b) + reg1 * T' * (grad_huber.(T * x, reg2))
+                        end
+
                         x, _ = ncg_phase(I(N), ∇q, xk;
                                         niter = 3,
-                                        W = LinearMapAA(x -> AWA * x + reg1 * T' * (Diagonal(curv_huber.(T*x,reg2)) * (T * x)), (N,N); T=ComplexF32),
+                                        W = LinearMapAA(x -> AWA * (x + vec(ref)) + reg1 * T' * (Diagonal(curv_huber.(T*x,reg2)) * (T * x)), (N,N); T=ComplexF32),
                                         xhow = xhow)
                         out[iter + 1] = fun(x, iter)
                 end
         elseif curvhow === :imp
                 for iter = 1:niter
-                        s = A * x
+                        s = A * (x + vec(ref))
                         gs = (b .+ sqrt.(b.^2 + b .* abs2.(s))) ./ abs.(s)
                         W = Diagonal(curv_phi.(gs, y, b))
-                        AWA = A'*W*A
-                        ∇q = x -> AWA * (x - xk) + A' * grad_phi.(A * xk, y, b) + reg1 * T' * (grad_huber.(T * x, reg2))
+                        # AWA = A'*W*A
+                        if xhow === :real
+                                ∇q = x -> real(A' * (W * (A * (x - xk))) + A' * grad_phi.(A * (xk + vec(ref)), y, b) + reg1 * T' * (grad_huber.(T * x, reg2)))
+                        else
+                                ∇q = x -> A' * (W * (A * (x - xk))) + A' * grad_phi.(A * (xk + vec(ref)), y, b) + reg1 * T' * (grad_huber.(T * x, reg2))
+                        end
                         xk = copy(x)
                         x, _ = ncg_phase(I(N), ∇q, xk;
                                         niter = 3,
-                                        W = LinearMapAA(x -> AWA * x + reg1 * T' * (Diagonal(curv_huber.(T*x, reg2)) * (T * x)), (N,N); T=ComplexF32),
+                                        W = LinearMapAA(x -> A' * (W * (A * (x + vec(ref)))) + reg1 * T' * (Diagonal(curv_huber.(T*x, reg2)) * (T * x)), (N,N); T=ComplexF32),
                                         xhow = xhow)
                         out[iter + 1] = fun(x, iter)
                 end
